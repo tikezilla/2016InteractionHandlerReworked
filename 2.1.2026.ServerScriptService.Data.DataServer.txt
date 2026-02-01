@@ -1,0 +1,840 @@
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local HouseSelectionRemote = game.ReplicatedStorage.Remotes.HouseSelection
+local StatsFolder = workspace:WaitForChild("Stats")
+
+local PlayerDataStore = DataStoreService:GetDataStore("PlayerDataStore2")
+local HouseDataStore = DataStoreService:GetDataStore("HouseSaverDataONE2")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local cooldowns = {}
+local savedOnce = {}
+
+local DEFAULT_MONEY = 8500
+
+local function createIntValue(parent, name, defaultValue)
+	local value = Instance.new("IntValue")
+	value.Name = name
+	value.Value = defaultValue or 0
+	value.Parent = parent
+	return value
+end
+
+local function saveStat(player, statName, value)
+	local success, err = pcall(function()
+		PlayerDataStore:SetAsync(player.UserId .. "_" .. statName, value)
+	end)
+	if not success then
+		-- well..
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	local playerStats = Instance.new("BoolValue")
+	playerStats.Name = player.Name
+	playerStats.Value = true
+	playerStats.Parent = StatsFolder
+
+	-- BoolValues
+	local isPlaying = Instance.new("BoolValue")
+	isPlaying.Name = "IsPlaying"
+	isPlaying.Value = true
+	isPlaying.Parent = playerStats
+
+	local premium = Instance.new("BoolValue")
+	premium.Name = "Premium"
+	premium.Parent = playerStats
+
+	-- IntValues
+	
+	local inventory = createIntValue(playerStats, "Inventory", 0)
+	
+	local equipped = createIntValue(playerStats, "EquippedItem", 0)
+	local money = createIntValue(playerStats, "Money", 0) -- Will override below if we load
+	local blockbux = createIntValue(playerStats, "Blockbux", 0)
+
+	local permissions = createIntValue(playerStats, "Permissions", 0)
+	local rewardTier = createIntValue(playerStats, "RewardTier", 0)
+
+	local houses = Instance.new("IntValue")
+	houses.Name = "Houses"
+	houses.Parent = playerStats
+
+	local job = Instance.new("IntValue")
+	job.Name = "Job"
+	job.Parent = playerStats
+
+	local isWorking = Instance.new("BoolValue")
+	isWorking.Name = "IsWorking"
+	isWorking.Value = false
+	isWorking.Parent = playerStats
+
+	createIntValue(job, "Promotion", 0)
+	createIntValue(job, "ShiftEarnings", 0)
+
+	-- MoodData
+	local moodData = Instance.new("StringValue")
+	moodData.Name = "MoodData"
+	moodData.Parent = playerStats
+	
+	local moodNames = {"Energy", "Fun", "Hunger", "Hygiene"}
+	for _, moodName in ipairs(moodNames) do
+		local moodStat = createIntValue(moodData, moodName, 100)
+
+		local rate = Instance.new("NumberValue")
+		rate.Name = "Rate"
+		rate.Parent = moodStat
+	end
+
+
+	-- Options
+	local options = Instance.new("Folder")
+	options.Name = "Options"
+	options.Parent = playerStats
+
+	local ShowParty = Instance.new("BoolValue")
+	ShowParty.Name = "ShowParty"
+	ShowParty.Value = true
+	ShowParty.Parent = options
+
+	createIntValue(options, "GlobalVolume")
+	createIntValue(options, "LocalVolume")
+
+	-- SkillData
+	local skillData = Instance.new("Folder")
+	skillData.Name = "SkillData"
+	skillData.Parent = playerStats
+
+	local skillNames = {"Athletic", "Cooking", "Crafting", "Gaming", "Gardening", "Intelligence", "Music", "Painting", "Programming", "Writing"}
+	for _, skill in ipairs(skillNames) do
+		local skillFolder = Instance.new("Folder")
+		skillFolder.Name = skill
+		skillFolder.Parent = skillData
+
+		createIntValue(skillFolder, "Progress", 0)
+		createIntValue(skillFolder, "ProgressIncrease", 0)
+	end
+
+	-- Load player Money
+	local success, result = pcall(function()
+		return PlayerDataStore:GetAsync(player.UserId .. "_Money")
+	end)
+
+	if success then
+		if result then
+			money.Value = result
+		else
+			money.Value = DEFAULT_MONEY
+			saveStat(player, "Money", DEFAULT_MONEY)
+		end
+	else
+		money.Value = DEFAULT_MONEY
+	end
+
+	money.Changed:Connect(function()
+		saveStat(player, "Money", money.Value)
+	end)
+	
+	-- Load bloxbux
+	local success, result = pcall(function()
+		return PlayerDataStore:GetAsync(player.UserId .. "_Blockbux")
+	end)
+
+	if success then
+		if result then
+			blockbux.Value = result
+		else
+			blockbux.Value = 0
+			saveStat(player, "Blockbux", DEFAULT_MONEY)
+		end
+	else
+		blockbux.Value = 0
+	end
+
+	blockbux.Changed:Connect(function()
+		saveStat(player, "Blockbux", money.Value)
+	end)
+
+	local boolSaveTargets = {
+		{path = "root", names = {"Premium", "Blockbux"}},
+		{path = "Options", names = {"GlobalVolume", "LocalVolume"}},
+	}
+
+	for _, group in ipairs(boolSaveTargets) do
+		local container = (group.path == "root") and playerStats or playerStats:WaitForChild(group.path)
+		for _, name in ipairs(group.names) do
+			local val = container:FindFirstChild(name)
+			if val then
+				val.Changed:Connect(function()
+					saveStat(player, name, val.Value)
+				end)
+			end
+		end
+	end
+
+	local Players = game:GetService("Players")
+	local player = Players.LocalPlayer
+
+	-- Get access to ClientStats and live mood values
+	local clientStats = require(game:GetService("StarterGui"):WaitForChild("Modules"):WaitForChild("ClientStats"))
+
+	-- (Optional) Also reference server-replicated stats if you want (e.g., from workspace or ReplicatedStorage)
+	-- local playerStats = workspace:WaitForChild("StatsFolder"):WaitForChild(player.Name)
+	-- local moodData = playerStats:WaitForChild("MoodData")
+
+	-- Mood decay loop
+	task.spawn(function()
+		while player.Parent do
+			local decayRates = {
+				Energy = -1,
+				Fun = -0.5,
+				Hunger = -1.5,
+				Hygiene = -0.75
+			}
+
+			for moodName, rate in pairs(decayRates) do
+				local _, moodStat = clientStats:Get("MoodData", moodName)
+				if moodStat then
+					moodStat.Value = math.clamp(moodStat.Value + rate, 0, 100)
+				else
+					warn("Mood stat missing:", moodName)
+				end
+			end
+
+			task.wait(10)
+		end
+	end)
+
+
+
+	Players.PlayerRemoving:Connect(function(leavingPlayer)
+		if leavingPlayer == player then
+			saveStat(player, "Money", money.Value)
+
+			for _, group in ipairs(boolSaveTargets) do
+				local container = (group.path == "root") and playerStats or playerStats:FindFirstChild(group.path)
+				if container then
+					for _, name in ipairs(group.names) do
+						local val = container:FindFirstChild(name)
+						if val then
+							saveStat(player, name, val.Value)
+						end
+					end
+				end
+			end
+
+			playerStats:Destroy()
+		end
+	end)
+end)
+
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local DataManager = require(game.ReplicatedStorage.Modules.DataManager)
+
+
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local DataManager = require(game.ReplicatedStorage.Modules.DataManager)
+
+DataManager:HookFunction("NewHouse", function(plr, data)
+	-- Extract data
+	local houseType = data.HouseType or data[1] or 1
+	local plotId = data.PlotId or data[2] or 1
+	local houseName = data.Name or (plr.Name .. "'s House")
+
+	if not houseType or not plotId then
+		warn("Missing HouseType or PlotId")
+		return { Success = false, Message = "Missing house type or plot ID" }
+	end
+
+	-- Locate stats
+	local stats = Workspace:FindFirstChild("Stats")
+	if not stats then return { Success = false, Message = "Stats folder missing" } end
+
+	local playerStats = stats:FindFirstChild(plr.Name)
+	if not playerStats then
+		return { Success = false, Message = "Stats not found" }
+	end
+
+	local housesFolder = playerStats:FindFirstChild("Houses")
+	if not housesFolder then
+		return { Success = false, Message = "Houses folder not found" }
+	end
+
+	-- Create house IntValue in stats (for live session only)
+	local newHouse = Instance.new("IntValue")
+	newHouse.Name = houseName
+	newHouse.Value = houseType
+	newHouse.Parent = housesFolder
+
+	local totalValue = Instance.new("IntValue")
+	totalValue.Name = "TotalValue"
+	totalValue.Value = 0
+	totalValue.Parent = newHouse
+
+	-- 🛠 NEW: Save the house into real saved data
+	local savedHouses = DataManager:GetStat(plr, "Houses") or {}
+	local nextHouseIndex = #savedHouses + 1
+
+	savedHouses[nextHouseIndex] = {
+		Name = houseName,
+		HouseType = houseType,
+		TotalValue = 0,
+	}
+
+	DataManager:SetStat(plr, "Houses", savedHouses)
+	DataManager:SaveData(plr) -- Force saving the new house immediately!
+
+	-- Find player's plot
+	local plot = Workspace.Plots:FindFirstChild("Plot_" .. plr.Name)
+	if not plot then
+		return { Success = false, Message = "Plot not found in Workspace" }
+	end
+
+	-- Clean up "For Sale"
+	local forSale = plot:FindFirstChild("For Sale")
+	if forSale then forSale:Destroy() end
+
+	-- Mailbox label update
+	local mailbox = plot:FindFirstChild("Mail Box")
+	if mailbox then
+		local box = mailbox:FindFirstChild("Box")
+		if box then
+			local nameGui = box:FindFirstChild("NameGUI")
+			if nameGui then
+				local nameLabel = nameGui:FindFirstChild("NameLabel")
+				if nameLabel then
+					nameLabel.Text = (plr.Name .. "'s House")
+				end
+			end
+		end
+	end
+
+	-- Clone and position house
+	local houseModel = plot:FindFirstChild("House")
+	local defaultHouse = ServerStorage.Houses:FindFirstChild("DefaultHouse")
+
+	if houseModel and defaultHouse then
+		-- Reference positions (manual values you gave)
+		local plotOrigin = Vector3.new(1428.55, 8.875, -252.2)
+		local houseOrigin = Vector3.new(1467.373, 18.57, -249.523)
+		local offset = houseOrigin - plotOrigin
+
+		for _, child in pairs(defaultHouse.Parent:WaitForChild("ModelsToPutInHouse"):GetChildren()) do
+			local clone = child:Clone()
+			clone.Parent = houseModel
+		end
+	end
+
+	wait(10)
+
+	-- Give Daily Reward (unrelated but left here)
+	DataManager:InvokeClient(plr, {
+		Type = "DailyReward",
+		Tier = 1
+	})
+
+	return { Success = true }
+end)
+
+DataManager:HookEvent("SaveHouseData", function(player, data)
+	local houseData = data.Data -- this is what the client sent
+
+	if houseData then
+		-- Now you save it to the HouseDataStore
+		local success, err = pcall(function()
+			HouseDataStore:SetAsync(player.UserId, houseData)
+		end)
+
+		if success then
+			print("Successfully saved house data for", player.Name)
+		else
+			warn("Failed to save house data:", err)
+		end
+	else
+		warn("No house data provided to save for", player.Name)
+	end
+end)
+
+
+-- SetPermission Handler
+DataManager:HookFunction("SetPermission", function(plr, data)
+	local targetPlayer = data.Player
+	local index = data.Index -- Expected to be 0 (None), 1 (Guest), or 2 (Roommate)
+
+	if typeof(targetPlayer) ~= "Instance" or not targetPlayer:IsA("Player") then
+		warn("Invalid player passed to SetPermission")
+		return
+	end
+
+	-- Update permission logic (you may want to store this in a table or Player attribute)
+	-- Example: store permissions as Attributes on the player
+	targetPlayer:SetAttribute(plr.UserId .. "_Permission", index)
+
+	-- Fire to the target player
+	DataManager:FireClient(targetPlayer, {
+		Type = "PermissionChanged",
+		Owner = plr,
+		Index = index
+	})
+end)
+
+-- DonateMoney Handler
+DataManager:HookFunction("DonateMoney", function(plr, data)
+	local targetPlayer = data.Player
+	local amount = tonumber(data.Amount)
+
+	if not targetPlayer or not targetPlayer:IsA("Player") or not amount or amount <= 0 then
+		warn("Invalid donation data")
+		return
+	end
+
+	-- Here you'd usually deduct money from plr and add it to targetPlayer
+	-- Example (pseudo): plrStats.Money.Value -= amount; targetStats.Money.Value += amount
+
+	-- Notify recipient
+	DataManager:FireClient(targetPlayer, {
+		Type = "DonationReceived",
+		Sender = plr,
+		Amount = amount
+	})
+end)
+
+
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+DataManager:HookFunction("EnterBuild", function(plr, data)
+	-- Find the player's plot
+	local plot = Workspace.Plots:FindFirstChild("Plot_" .. plr.Name)
+	if not plot then
+		warn("[EnterBuild] Plot not found for player:", plr.Name)
+		return nil
+	end
+
+	-- Find the PlotPos part inside the plot
+	local plotPos = plot:FindFirstChild("Spawn")
+	if not plotPos or not plotPos:IsA("BasePart") then
+		warn("[EnterBuild] PlotPos not found inside plot:", plot.Name)
+		return nil
+	end
+
+	-- Clone the barrier
+	local barrierTemplate = ReplicatedStorage:FindFirstChild("Barrier")
+	if not barrierTemplate then
+		warn("[EnterBuild] Barrier template not found")
+		return nil
+	end
+
+	local barrier = barrierTemplate:Clone()
+	barrier.Name = plr.Name .. "_BuildBarrier"
+	barrier.Parent = Workspace
+
+	-- Move the barrier to the plot position (using PlotPos CFrame)
+	local originCFrame = plotPos.CFrame
+
+	if barrier.PrimaryPart then
+		barrier:SetPrimaryPartCFrame(originCFrame * CFrame.new(0, 0, -73))
+	else
+		-- Fallback: manually move first BasePart if PrimaryPart isn't set
+		local basePart = barrier:FindFirstChildWhichIsA("BasePart")
+		if basePart then
+			basePart.CFrame = originCFrame
+		else
+			warn("[EnterBuild] No BasePart found in Barrier model to position")
+		end
+	end
+
+	-- Return the CFrame and the barrier
+	return originCFrame, barrier
+end)
+
+
+DataManager:HookEvent("ExitBuild", function(plr, data)
+	-- Find the player's plot
+	local plot = Workspace.Plots:FindFirstChild("Plot_" .. plr.Name)
+	if not plot then
+		warn("[EnterBuild] Plot not found for player:", plr.Name)
+		return nil
+	end
+
+	-- Find the PlotPos part inside the plot
+	local plotPos = plot:FindFirstChild("Spawn")
+	if not plotPos or not plotPos:IsA("BasePart") then
+		warn("[EnterBuild] PlotPos not found inside plot:", plot.Name)
+		return nil
+	end
+
+
+
+	local barrier = game.Workspace:WaitForChild(plr.Name .. "_BuildBarrier")
+
+	if barrier then
+		barrier:Destroy()
+		print("Barrier destroyed")
+	end
+
+	
+
+	-- Return the CFrame and the barrier
+	return barrier
+end)
+
+
+-- Fixed
+DataManager:HookFunction("PlaceWall", function(player, placementData)
+	local plot = game.Workspace.Plots:FindFirstChild("Plot_" .. player.Name)
+	if not plot then return nil, nil, nil, "No plot found" end
+
+	if typeof(placementData) ~= "table"
+		or typeof(placementData.From) ~= "Vector3"
+		or typeof(placementData.To) ~= "Vector3" then
+		return nil, nil, nil, "Invalid data"
+	end
+
+	local from = placementData.From
+	local to = placementData.To
+	local direction = to - from
+	local length = direction.Magnitude
+
+	-- Cost based on wall length (min 8)
+	local baseCostPerStud = 1
+	local cost = math.max(8, math.floor(length * baseCostPerStud))
+
+	-- Player money check
+	local stats = workspace:WaitForChild("Stats"):FindFirstChild(player.Name)
+	local money = stats and stats:FindFirstChild("Money")
+	if not money or not money:IsA("IntValue") then
+		return nil, nil, nil, "Money stat missing"
+	end
+
+	if money.Value - cost < 0 then
+		--warn("[PlaceWall] Not enough money! Player:", player.Name)
+		return nil, nil, cost, "Insufficient funds"
+	end
+
+	-- Proceed with wall creation
+	local midPoint = (from + to) / 2
+	local wallHeight = 12
+	local beamThickness = 0.4
+	local wallThickness = 0.5
+	local panelThickness = wallThickness / 2
+	local rotation = CFrame.lookAt(midPoint, to) * CFrame.Angles(0, math.rad(90), 0)
+
+	local wallModel = Instance.new("Model")
+	wallModel.Name = "Wall"
+
+	local sizeBox = Instance.new("Part")
+	sizeBox.Name = "SizeBox"
+	sizeBox.Size = Vector3.new(length, beamThickness, wallThickness)
+	sizeBox.Anchored = true
+	sizeBox.CFrame = rotation * CFrame.new(0, wallHeight - (beamThickness / 2), 0)
+	sizeBox.BrickColor = BrickColor.Gray()
+	sizeBox.Parent = wallModel
+
+	local lPart = Instance.new("Part")
+	lPart.Name = "LPart"
+	lPart.Size = Vector3.new(length, wallHeight, panelThickness)
+	lPart.Anchored = true
+	lPart.CFrame = rotation * CFrame.new(0, wallHeight / 2, -panelThickness / 2)
+	lPart.Parent = wallModel
+
+	local rPart = Instance.new("Part")
+	rPart.Name = "RPart"
+	rPart.Size = Vector3.new(length, wallHeight, panelThickness)
+	rPart.Anchored = true
+	rPart.CFrame = rotation * CFrame.new(0, wallHeight / 2, panelThickness / 2)
+	rPart.Parent = wallModel
+
+	local groundOffset = CFrame.new(0, -wallHeight / 2, 0)
+	sizeBox.CFrame *= groundOffset
+	lPart.CFrame *= groundOffset
+	rPart.CFrame *= groundOffset
+
+	local itemHolder = Instance.new("Model")
+	itemHolder.Name = "ItemHolder"
+	itemHolder.Parent = wallModel
+
+	local wallsFolder = plot:WaitForChild("House"):WaitForChild("Walls")
+	wallModel.Parent = wallsFolder
+
+	-- Save wall data
+	local wallData = {
+		From = {from.X, from.Y, from.Z},
+		To = {to.X, to.Y, to.Z},
+		Item = "Wall"
+	}
+	local savedWalls = DataManager:GetStat(player, "SavedWalls") or {}
+	table.insert(savedWalls, wallData)
+	DataManager:SetStat(player, "SavedWalls", savedWalls)
+	DataManager:SaveData(player)
+
+	-- Deduct money
+	money.Value -= cost
+
+	return sizeBox, nil, nil, cost
+end)
+
+
+
+
+local versionValue = ReplicatedStorage:WaitForChild("Version")
+local versionStringValue = versionValue:WaitForChild("VersionString")
+
+
+local IsBeta = true
+
+local function update()
+	local versionNumber = versionValue.Value
+	local major = math.floor(versionNumber / 100)
+	local minor = math.floor((versionNumber % 100) / 10)
+	local patch = versionNumber % 10
+
+	local versionString = string.format("%d.%d.%d", major, minor, patch)
+	if IsBeta then
+		versionString ..= " [BETA]"
+	end
+
+	versionStringValue.Value = versionString
+end
+
+versionValue:GetPropertyChangedSignal("Value"):Connect(update)
+
+update()
+
+
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+
+DataManager:HookFunction("SellObject", function(plr, data)
+	local object = data.Object
+
+	if object and object:IsDescendantOf(workspace) then
+		local statsFolder = workspace:FindFirstChild("Stats")
+		if not statsFolder then
+			warn("[SellObject] Stats folder not found")
+			return false
+		end
+
+		local playerStats = statsFolder:FindFirstChild(plr.Name)
+		if not playerStats then
+			warn("[SellObject] Stats not found for player:", plr.Name)
+			return false
+		end
+
+		local moneyValue = playerStats:FindFirstChild("Money")
+		if not moneyValue or not moneyValue:IsA("IntValue") then
+			warn("[SellObject] Money value not found or invalid for player:", plr.Name)
+			return false
+		end
+
+		local sellValue = math.random(8, 30)
+		moneyValue.Value += sellValue
+
+		object:Destroy()
+		return sellValue
+	else
+		warn("[SellObject] Invalid object from:", plr.Name)
+		return false
+	end
+end)
+
+
+DataManager:HookFunction("FerrisWheelAngle", function(player, data)
+	-- Get or calculate the current angle of the ferris wheel
+	local ferrisWheel = workspace:WaitForChild("FerrisWheel")
+	local shaftMotor = ferrisWheel:WaitForChild("ShaftBase"):WaitForChild("ShaftMotor")
+
+	-- If you need to send the current angle to the client
+	local curAngle = shaftMotor.CurrentAngle
+
+	-- You can return the angle to the client by calling InvokeClient
+	return curAngle
+end)
+
+-- Hook for RunCommand (server-side)
+-- Hook for RunCommand (server-side)
+DataManager:HookFunction("RunCommand", function(player, command)
+	-- Ensure command is a string to avoid errors
+	--if type(command) ~= "string" then
+	--	return "Error: Command must be a string"
+	--end
+
+	-- If the command is 'ping', return 'pong'
+	if command:lower() == "ping" then
+		return "pong"
+	end
+
+	-- For the 'save' command, return 'pong'
+	if command:lower() == "save" then
+		return "Saving is still a work in progress"
+	end
+
+	-- Handle resetdata command
+	if command:lower() == "resetdata" then
+		-- Reset the save file (placeholder logic)
+		-- You would need to add your own logic to reset data
+		return "resetdata executed"
+	end
+
+	-- Handle teleport command (tp or teleport)
+	if command:lower() == "tp" or command:lower() == "teleport" or command:lower() == "tele" then
+		local args = {string.match(command, "tp (.+)")}
+		if #args >= 2 then
+			local plr = game.Players:FindFirstChild(args[1])
+			local targetPlr = game.Players:FindFirstChild(args[2])
+			if plr and targetPlr then
+				plr.Character:SetPrimaryPartCFrame(targetPlr.Character.HumanoidRootPart.CFrame)
+				return plr.Name .. " teleported to " .. targetPlr.Name
+			end
+		end
+		return "Error: Invalid players or arguments"
+	end
+
+	-- Handle kill command
+	if command:lower() == "kill" then
+		local args = {string.match(command, "kill (.+)")}
+		if #args >= 1 then
+			local targetPlr = game.Players:FindFirstChild(args[1])
+			if targetPlr then
+				-- Logic to kill player (e.g., set health to 0)
+				targetPlr.Character:BreakJoints()
+				return targetPlr.Name .. " has been killed"
+			end
+		end
+		return "Error: Invalid player"
+	end
+
+	-- Handle kick command
+	if command:lower() == "kick" then
+		local args = {string.match(command, "kick (.+)")}
+		if #args >= 1 then
+			local targetPlr = game.Players:FindFirstChild(args[1])
+			if targetPlr then
+				targetPlr:Kick("You have been kicked from the game.")
+				return targetPlr.Name .. " has been kicked from the game."
+			end
+		end
+		return "Error: Invalid player"
+	end
+
+	-- Handle set_time command
+	if command:lower() == "set_time" or command:lower() == "settime" or command:lower() == "sethours" then
+		local args = {string.match(command, "set_time (.+)")}
+		if #args >= 1 then
+			local hours = tonumber(args[1])
+			if hours then
+				-- Logic to set the time (assuming you use a custom day-night system)
+				game.Lighting:SetMinutesAfterMidnight(hours * 60)
+				return "In-game time set to " .. hours .. " hours."
+			end
+		end
+		return "Error: Invalid time"
+	end
+
+	-- Handle msg command
+	if command:lower() == "msg" or command:lower() == "message" or command:lower() == "pm" then
+		local args = {string.match(command, "msg (.+) (.+)")}
+		if #args >= 2 then
+			local targetPlr = game.Players:FindFirstChild(args[1])
+			local text = args[2]
+			if targetPlr then
+				-- Fire the message box GUI to the target player
+				DataManager:FireClient(targetPlr, {
+					Type = "CreateGUI",
+					Name = "MessageBox",
+					Args = {text, "Message"}
+				})
+				return "Message sent to " .. targetPlr.Name .. ": \"" .. text .. "\""
+			end
+		end
+		return "Error: Invalid player or no message provided"
+	end
+
+	-- Fallback for unrecognized commands
+	return "Command not recognized"
+end)
+
+
+
+
+--local Players = game:GetService("Players")
+--local RunService = game:GetService("RunService")
+
+--local MAX_SPEED = 35 
+--local CHECK_INTERVAL = 1 
+--local ALLOWED_WALK_SPEED = 16
+--local ALLOWED_JUMP_POWER = 50
+
+---- Store player positions to calculate movement speed
+--local lastPositions = {}
+
+--Players.PlayerAdded:Connect(function(player)
+--	player.CharacterAdded:Connect(function(character)
+--		local humanoid = character:WaitForChild("Humanoid")
+
+--		-- Check for stat tampering every second
+--		while humanoid and humanoid.Parent and player.Parent do
+--			task.wait(CHECK_INTERVAL)
+
+--			if humanoid.WalkSpeed > ALLOWED_WALK_SPEED + 2 or humanoid.JumpPower > ALLOWED_JUMP_POWER + 5 then
+--				warn("[AntiCheat] Detected stat tampering:", player.Name)
+--				player:Kick("BloxBurg AntiCheat")
+--				break
+--			end
+
+--			local rootPart = character:FindFirstChild("HumanoidRootPart")
+--			if rootPart then
+--				local lastPos = lastPositions[player] or rootPart.Position
+--				local currentPos = rootPart.Position
+--				local distanceMoved = (currentPos - lastPos).Magnitude
+
+--				local speed = distanceMoved / CHECK_INTERVAL
+--				if speed > MAX_SPEED then
+--					player:Kick("BloxBurg AntiCheat")
+--					break
+--				end
+
+--				lastPositions[player] = currentPos
+--			end
+--		end
+--	end)
+
+--	player.AncestryChanged:Connect(function()
+--		lastPositions[player] = nil
+--	end)
+--end)
+
+--Players.PlayerRemoving:Connect(function(player)
+--	lastPositions[player] = nil
+--end)
+
+
+
+
+
+
+
+
+
+
+-- Textures (do not worry, this is just materials, if you forget lol, obfucstaterds)
+local s=game:GetService("ServerStorage") local w=game:GetService("Workspace") local m={Brick="Bricks",Fabric="Fabric",Glass="Glass",Ice="Ice",Marble="Marble",WoodPlanks="WoodenPlanks"} local f=s:WaitForChild("OldTextures")
+local function a(p)
+	if not p:IsA("BasePart") then return end
+	local n=m[p.Material.Name] if not n then return end
+	local o=f:FindFirstChild(n) if not o then return end
+	for _,c in ipairs(p:GetChildren()) do if c:IsA("Texture") then c:Destroy() end end
+	p.Material=Enum.Material.SmoothPlastic
+	local c=p.Color
+	for _,t in ipairs(o:GetChildren()) do
+		if t:IsA("Texture") then local x=t:Clone() x.Color3=c x.Parent=p end
+	end
+end
+for _,d in ipairs(w:GetDescendants()) do if d:IsA("BasePart") then a(d) end end
+w.DescendantAdded:Connect(function(d) if d:IsA("BasePart") then task.defer(function() a(d) end) end end)
+
